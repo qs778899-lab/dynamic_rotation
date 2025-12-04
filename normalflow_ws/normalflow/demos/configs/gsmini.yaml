@@ -1,0 +1,12 @@
+# Device Name
+device_name: "Virtual Cam"
+# device_name: "GelSight"
+# Pixel Per Millimeter
+ppmm: 0.0634 #wwj:like Millimeter per pixel
+# Desired Image Width and Height
+imgh: 240
+imgw: 320
+# Raw image width, height, and framerate
+raw_imgh: 2464
+raw_imgw: 3280
+framerate: 25
