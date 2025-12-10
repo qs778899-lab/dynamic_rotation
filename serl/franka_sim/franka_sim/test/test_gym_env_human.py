@@ -6,7 +6,8 @@ import numpy as np
 
 from franka_sim import envs
 
-env = envs.PandaPickCubeGymEnv(action_scale=(0.1, 1))
+#! 修改源码
+env = envs.PandaPickCubeGymEnv(action_scale=(0.1, 1), render_mode="human")
 action_spec = env.action_space
 
 
