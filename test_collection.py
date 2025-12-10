@@ -3,9 +3,7 @@ import sys
 import signal
 import atexit
 sys.path.append("FoundationPose")
-from estimater import *
 from datareader import *
-from dino_mask import get_mask_from_GD 
 from create_camera import CreateRealsense
 import cv2
 import numpy as np
@@ -25,7 +23,6 @@ from transforms3d.euler import euler2mat, mat2euler
 from scipy.spatial.transform import Rotation as R
 import queue
 from spatialmath import SE3, SO3
-from grasp_utils import normalize_angle, extract_euler_zyx, print_pose_info
 ###from calculate_grasp_pose_from_object_pose import execute_grasp_from_object_pose, detect_dent_orientation
 from camera_reader import CameraReader
 # from level2_action import detect_object_pose_using_foundation_pose, choose_grasp_pose, execute_grasp_action, detect_object_orientation, adjust_object_orientation, detect_contact_with_surface
@@ -88,15 +85,15 @@ preview_running = None
 
 if __name__ == "__main__":
     rospy.init_node('ros_test', anonymous=True)
-    # 创建带时间戳的保存目录
-    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-    save_dir = os.path.join("record_images_during_grasp", timestamp)
-    os.makedirs(save_dir, exist_ok=True)
-    # print(f"图像将保存到: {save_dir}")
-    angle_log_path = os.path.join(save_dir, "angle_log.csv")
-    with open(angle_log_path, 'w') as f:
-        f.write("frame,timestamp,angle_z_deg,detected_angles,avg_angle\n")
-    # print(f"角度数据将保存到: {angle_log_path}")
+    # # 创建带时间戳的保存目录
+    # timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    # save_dir = os.path.join("record_images_during_grasp", timestamp)
+    # os.makedirs(save_dir, exist_ok=True)
+    # # print(f"图像将保存到: {save_dir}")
+    # angle_log_path = os.path.join(save_dir, "angle_log.csv")
+    # with open(angle_log_path, 'w') as f:
+    #     f.write("frame,timestamp,angle_z_deg,detected_angles,avg_angle\n")
+    # # print(f"角度数据将保存到: {angle_log_path}")
 
     # 使用 env.py 初始化环境（包含机械臂、相机等）
     env = create_env("config.json")
@@ -120,24 +117,94 @@ if __name__ == "__main__":
     if camera_yimu_2.cap is None or not camera_yimu_2.cap.isOpened():
         print("无法启动相机 yimu_2")
 
-    record = True
+    record = False
     if record:
 
         gripper.control(position=400, force=20, speed=12)
 
-        wait = rospy.Rate(1/6)  
+        wait = rospy.Rate(1/7)  
         wait.sleep()
 
         frame_yimu_1 = camera_yimu_1.get_current_frame()
         frame_yimu_2 = camera_yimu_2.get_current_frame()
 
+        # 转换为灰度图像（去除颜色）
+        frame_yimu_1_gray = cv2.cvtColor(frame_yimu_1, cv2.COLOR_BGR2GRAY)
+        frame_yimu_2_gray = cv2.cvtColor(frame_yimu_2, cv2.COLOR_BGR2GRAY)
+
         # 保存图像到 record_yimu_monitor 文件夹
         yimu_save_dir = "record_yimu_monitor"
         os.makedirs(yimu_save_dir, exist_ok=True)
         timestamp_yimu = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        # 保存原色彩图像
         cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_1.jpg"), frame_yimu_1)
         cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_2.jpg"), frame_yimu_2)
-        print(f"已保存图像到: {yimu_save_dir}/{timestamp_yimu}_yimu_1.jpg 和 {timestamp_yimu}_yimu_2.jpg")
+        frame_yimu_1_flip_color = cv2.flip(frame_yimu_1, 1)
+        cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_1_flip.jpg"), frame_yimu_1_flip_color)
+
+        # 保存灰度图像
+        cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_1_gray.jpg"), frame_yimu_1_gray)
+        cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_2_gray.jpg"), frame_yimu_2_gray)
+        frame_yimu_1_flip_gray = cv2.flip(frame_yimu_1_gray, 1)  # 1 表示水平翻转
+        cv2.imwrite(os.path.join(yimu_save_dir, f"{timestamp_yimu}_yimu_1_flip_gray.jpg"), frame_yimu_1_flip_gray)
         
+        print(f"已保存彩色和灰度图像到: {yimu_save_dir}/{timestamp_yimu}_yimu_*.jpg")
+    
+    control_gripper = True
+    if control_gripper:
+        # 获取初始帧作为参考
+        prev_frame_yimu_1 = camera_yimu_1.get_current_frame()
+        prev_frame_yimu_2 = camera_yimu_2.get_current_frame()
+        
+        # 开始闭合gripper
+        gripper.control(position=200, force=20, speed=6)
+
+        # 像素变化检测参数
+        change_threshold = 1.0  # 变化百分比阈值
+        pixel_threshold = 2     # 像素差异阈值
+        min_area = 5            # 最小变化区域面积
+
+        while True:
+            wait = rospy.Rate(1/0.1)  # 0.1s检测间隔
+            wait.sleep()
+            
+            # 获取当前帧
+            frame_yimu_1 = camera_yimu_1.get_current_frame()
+            frame_yimu_2 = camera_yimu_2.get_current_frame()
+
+            # 检测两个相机是否有像素变化
+            change_1 = camera_yimu_1.has_significant_change(
+                prev_frame_yimu_1, frame_yimu_1,
+                change_threshold=change_threshold,
+                pixel_threshold=pixel_threshold,
+                min_area=min_area
+            )
+            change_2 = camera_yimu_2.has_significant_change(
+                prev_frame_yimu_2, frame_yimu_2,
+                change_threshold=change_threshold,
+                pixel_threshold=pixel_threshold,
+                min_area=min_area
+            )
+
+            # 如果任一相机检测到像素变化，停止gripper
+            if change_1 or change_2:
+                gripper.pause_movement()
+                print(f"检测到像素变化，gripper已暂停! (cam1: {change_1}, cam2: {change_2})")
+                break
+            
+            # 更新前一帧
+            prev_frame_yimu_1 = frame_yimu_1
+            prev_frame_yimu_2 = frame_yimu_2
+
+        # gripper暂停后，保持程序运行，等待用户决定下一步操作
+        print("Gripper已停止在当前位置，按回车键继续或按Ctrl+C退出...")
+        try:
+            input()  # 等待用户输入
+        except KeyboardInterrupt:
+            print("\n用户中断")
+
+        
+
 
 

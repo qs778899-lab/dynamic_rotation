@@ -4,10 +4,18 @@ normalflow_ws/normalflow/demos/images/
 
 # 大型模型文件
 GroundingDino/groundingdino_swint_ogc.pth
+dinov2_models/
 *.pth
 *.ckpt
 *.weights
 *.h5
+
+# 下载临时文件
+*.crdownload
+*.part
+*.download
+dinov2_models/
+
 
 Qwen3-VL/
 

@@ -19,20 +19,13 @@ import torch.nn.functional as F
 from torchvision import transforms
 from PIL import Image
 import numpy as np
-
-# 导入dinov2的vision_transformer模块
-# 参考: dinov2/hub/backbones.py 第33行
+import cv2
 from dinov2.models import vision_transformer as vits
 
 
 def load_dinov2_from_local(model_path: str, with_registers: bool = False):
     """
-    从本地加载DINOv2 ViT-S/14模型
-    
-    代码来源:
-    - 不带registers: dinov2/hub/backbones.py 第64-68行 dinov2_vits14()
-    - 带registers: dinov2/hub/backbones.py 第98-110行 dinov2_vits14_reg()
-    - vit_small定义: dinov2/models/vision_transformer.py 第341-352行
+    从本地加载DINOv2模型 (支持 vit_small, vit_base, vit_large, vit_giant2)
     
     Args:
         model_path: 本地模型权重路径
@@ -41,19 +34,37 @@ def load_dinov2_from_local(model_path: str, with_registers: bool = False):
     Returns:
         加载好权重的模型
     """
+    # 根据文件名判断架构
+    filename = os.path.basename(model_path).lower()
+    if "vits" in filename:
+        arch_fn = vits.vit_small
+    elif "vitb" in filename:
+        arch_fn = vits.vit_base
+    elif "vitl" in filename:
+        arch_fn = vits.vit_large
+    elif "vitg" in filename:
+        arch_fn = vits.vit_giant2
+    else:
+        print(f"[警告] 无法从文件名 '{filename}' 判断模型架构，默认使用 vit_small")
+        arch_fn = vits.vit_small
+
+    # 公共参数
+    kwargs = dict(
+        patch_size=14,
+        img_size=518,
+        init_values=1.0,
+        block_chunks=0,
+    )
+
     if with_registers:
         # 参考 dinov2/hub/backbones.py 第102-109行
-        # dinov2_vits14_reg 的参数设置
-        model = vits.vit_small(
-            patch_size=14,
+        kwargs.update(dict(
             num_register_tokens=4,
             interpolate_antialias=True,
             interpolate_offset=0.0,
-        )
-    else:
-        # 参考 dinov2/hub/backbones.py 第68行
-        # dinov2_vits14 默认 patch_size=14
-        model = vits.vit_small(patch_size=14)
+        ))
+    
+    model = arch_fn(**kwargs)
     
     # 加载权重
     # 参考 dinov2/hub/backbones.py 第58-59行
@@ -227,14 +238,18 @@ class DINOv2FeatureExtractor:
 
 
 # ==================== 使用示例 ====================
+# python dinov2_similarity.py 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DINOv2图像相似度比较")
-    parser.add_argument("--image1", type=str, help="第一张图像路径")
-    parser.add_argument("--image2", type=str, help="第二张图像路径")
+    # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_134705_yimu_1_flip.jpg")
+    # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_134705_yimu_2.jpg")
+    parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_141216_yimu_1_flip_gray.jpg")
+    parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_141216_yimu_2_gray.jpg")
+
     parser.add_argument("--model", type=str, 
-                        default="dinov2_models/dinov2_vits14_pretrain.pth",
+                        default="dinov2_models/dinov2_vitl14_pretrain.pth",
                         help="模型权重路径")
     parser.add_argument("--with-registers", action="store_true",
                         help="使用带registers的模型版本")
@@ -245,21 +260,7 @@ if __name__ == "__main__":
     
     # 如果没有提供图像，运行演示
     if args.image1 is None or args.image2 is None:
-        print("=" * 60)
-        print("DINOv2 图像相似度比较工具")
-        print("=" * 60)
-        print("\n使用方法:")
-        print(f"  python {__file__} --image1 path/to/img1.jpg --image2 path/to/img2.jpg")
-        print("\n可选参数:")
-        print("  --model PATH          模型权重路径 (默认: dinov2_models/dinov2_vits14_pretrain.pth)")
-        print("  --with-registers      使用带registers的模型版本")
-        print("  --device cuda/cpu     运行设备")
-        print("\n模型文件位置:")
-        print("  - 不带registers: dinov2_models/dinov2_vits14_pretrain.pth")
-        print("  - 带registers:   dinov2_models/dinov2_vits14_reg4_pretrain.pth")
-        print("\n" + "=" * 60)
-        print("演示: 创建特征提取器...")
-        
+      
         # 检查模型文件是否存在
         model_path = os.path.join(os.path.dirname(__file__), args.model)
         if not os.path.exists(model_path):
