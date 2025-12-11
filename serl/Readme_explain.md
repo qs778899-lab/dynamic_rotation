@@ -39,5 +39,8 @@
 
     1. learner node 和 actor node可以放在不同的服务器，有利于加速模型训练
 
-    2. example(franka sim)有state observation和image observation两种examples
+    2. example(franka sim)有state observation和image observation两种examples。state observation拥有所有状态特权信息, image observation是真实环境中的视觉输入引导。
+
+    3. image encoder  怎么训练?
+    
 

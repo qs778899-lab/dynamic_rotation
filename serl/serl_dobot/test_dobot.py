@@ -115,6 +115,10 @@ if __name__ == "__main__":
     pose_now = dobot.get_pose()
     print("pose_now",pose_now)
     dobot.move_to_pose(pose_now[0]+10, pose_now[1], pose_now[2]+20, pose_now[3], pose_now[4], pose_now[5], speed=10, acceleration=3)
+
+
+
+    
     
 
 
