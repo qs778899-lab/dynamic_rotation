@@ -33,3 +33,11 @@
 
     # Terminal 2: 启动 Actor (必须在能连接机器人的电脑上)
     bash run_actor.sh
+
+
+# 框架特点:
+
+    1. learner node 和 actor node可以放在不同的服务器，有利于加速模型训练
+
+    2. example(franka sim)有state observation和image observation两种examples
+
