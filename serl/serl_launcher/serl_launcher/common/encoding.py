@@ -19,7 +19,30 @@ def _debug_print(name: str, tensor, only_once: bool = True):
     if only_once and name in _SHAPE_PRINTED:
         return
     _SHAPE_PRINTED.add(name)
-    print(f"[EncodingWrapper DEBUG] {name}: shape = {tensor.shape}")
+    
+    # 获取完整信息
+    shape = tensor.shape
+    ndim = len(shape)
+    total_elements = 1
+    for s in shape:
+        total_elements *= s
+    dtype = tensor.dtype
+    
+    # 格式化 shape 为更易读的格式
+    if ndim == 1:
+        shape_str = f"({shape[0]},) → 1D向量, {shape[0]}维"
+    elif ndim == 2:
+        shape_str = f"({shape[0]}, {shape[1]}) → batch={shape[0]}, features={shape[1]}"
+    elif ndim == 3:
+        shape_str = f"({shape[0]}, {shape[1]}, {shape[2]}) → batch={shape[0]}, H={shape[1]}, W={shape[2]}"
+    elif ndim == 4:
+        shape_str = f"({shape[0]}, {shape[1]}, {shape[2]}, {shape[3]}) → batch={shape[0]}, H={shape[1]}, W={shape[2]}, C={shape[3]}"
+    else:
+        shape_str = f"{shape}"
+    
+    print(f"[EncodingWrapper DEBUG] {name}:")
+    print(f"    shape: {shape_str}")
+    print(f"    dtype: {dtype}, total elements: {total_elements}")
 # =========================================================
 
 
