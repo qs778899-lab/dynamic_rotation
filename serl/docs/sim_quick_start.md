@@ -75,6 +75,10 @@ cd examples/async_drq_sim
 wget https://github.com/rail-berkeley/serl/releases/download/resnet10/resnet10_params.pkl
 ```
 
+先清除占用端口:
+
+    kill $(lsof -t -i :5488)
+
 Run learner node:
 ```bash
 bash run_learner.sh
