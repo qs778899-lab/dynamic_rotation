@@ -6,6 +6,22 @@ import jax
 import jax.numpy as jnp
 from einops import rearrange, repeat
 
+# ========== Debug: 控制是否打印 encoder shape ==========
+_DEBUG_PRINT_SHAPE = True  # 设为 False 可关闭打印
+_SHAPE_PRINTED = set()  # 用于只打印一次
+
+
+def _debug_print(name: str, tensor, only_once: bool = True):
+    """打印 tensor 的 shape，用于调试 encoder 输出"""
+    global _SHAPE_PRINTED
+    if not _DEBUG_PRINT_SHAPE:
+        return
+    if only_once and name in _SHAPE_PRINTED:
+        return
+    _SHAPE_PRINTED.add(name)
+    print(f"[EncodingWrapper DEBUG] {name}: shape = {tensor.shape}")
+# =========================================================
+
 
 class EncodingWrapper(nn.Module):
     """
@@ -35,6 +51,9 @@ class EncodingWrapper(nn.Module):
         encoded = []
         for image_key in self.image_keys:
             image = observations[image_key]
+            # ===== Debug: 打印原始图像 shape =====
+            _debug_print(f"Input image '{image_key}'", image)
+            
             if not is_encoded:
                 if self.enable_stacking:
                     # Combine stacking and channels into a single dimension
@@ -44,6 +63,8 @@ class EncodingWrapper(nn.Module):
                         image = rearrange(image, "B T H W C -> B H W (T C)")
 
             image = self.encoder[image_key](image, train=train, encode=not is_encoded)
+            # ===== Debug: 打印单个图像 encoder 输出 =====
+            _debug_print(f"Encoder output '{image_key}'", image)
 
             if stop_gradient:
                 image = jax.lax.stop_gradient(image)
@@ -51,10 +72,15 @@ class EncodingWrapper(nn.Module):
             encoded.append(image)
 
         encoded = jnp.concatenate(encoded, axis=-1)
+        # ===== Debug: 打印所有图像拼接后的 shape =====
+        _debug_print("All images concatenated", encoded)
 
         if self.use_proprio:
             # project state to embeddings as well
             state = observations["state"]
+            # ===== Debug: 打印原始 state shape =====
+            _debug_print("Input state (proprio)", state)
+            
             if self.enable_stacking:
                 # Combine stacking and channels into a single dimension
                 if len(state.shape) == 2:
@@ -67,8 +93,14 @@ class EncodingWrapper(nn.Module):
             )(state)
             state = nn.LayerNorm()(state)
             state = nn.tanh(state)
+            # ===== Debug: 打印 state 编码后的 shape =====
+            _debug_print("State encoded", state)
+            
             encoded = jnp.concatenate([encoded, state], axis=-1)
 
+        # ===== Debug: 打印最终输出 shape =====
+        _debug_print("Final encoded output", encoded)
+        
         return encoded
 
 
