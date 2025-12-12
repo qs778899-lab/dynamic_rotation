@@ -325,18 +325,26 @@ class DINOv2FeatureExtractor:
 
 
 # ==================== 使用示例 ====================
+# conda activate foundationpose
 # python dinov2_similarity.py 
 if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser(description="DINOv2图像相似度比较")
+    # 对称彩色图像
+    parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_133928_yimu_1_flip.jpg")
+    parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_133928_yimu_2.jpg")
+
     # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_134705_yimu_1_flip.jpg")
     # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_134705_yimu_2.jpg")
-    parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_141216_yimu_1_flip_gray.jpg")
-    parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_141216_yimu_2_gray.jpg")
+    # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_141216_yimu_1_flip_gray.jpg")
+    # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_141216_yimu_2_gray.jpg")
 
+    #不对称彩色图像
+    # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_141216_yimu_1_flip_color.jpg")
+    # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_141216_yimu_2_color.jpg")
     parser.add_argument("--model", type=str, 
-                        default="dinov2_models/dinov2_vitl14_pretrain.pth",
+                        default="dinov2_models/dinov2_vits14_pretrain.pth",
                         help="模型权重路径")
     parser.add_argument("--with-registers", action="store_true",
                         help="使用带registers的模型版本")
