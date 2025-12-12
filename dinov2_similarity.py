@@ -10,6 +10,7 @@ DINOv2 图像特征提取与相似度比较工具
 
 import sys
 import os
+import time
 
 # 添加dinov2路径
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "dinov2"))
@@ -279,6 +280,111 @@ class DINOv2FeatureExtractor:
         similarity = F.cosine_similarity(patch_feat1, patch_feat2).item()
         return similarity
     
+    @torch.no_grad()
+    def _get_patch_similarities(self, image1, image2):
+        """
+        内部方法：获取所有 patch 的逐位置相似度
+        
+        Returns:
+            patch_similarities: Tensor [256] 每个 patch 的相似度
+        """
+        img1 = self._load_image(image1)
+        img2 = self._load_image(image2)
+        tensor1 = self.transform(img1).unsqueeze(0).to(self.device)
+        tensor2 = self.transform(img2).unsqueeze(0).to(self.device)
+        
+        out1 = self.model.forward_features(tensor1)
+        out2 = self.model.forward_features(tensor2)
+        
+        patch_tokens1 = out1["x_norm_patchtokens"]
+        patch_tokens2 = out2["x_norm_patchtokens"]
+        
+        patch_tokens1 = F.normalize(patch_tokens1, dim=2, p=2)
+        patch_tokens2 = F.normalize(patch_tokens2, dim=2, p=2)
+        
+        patch_similarities = F.cosine_similarity(patch_tokens1, patch_tokens2, dim=2)
+        return patch_similarities.squeeze(0)  # [256]
+    
+    @torch.no_grad()
+    def compute_similarity_patch_all(self, image1, image2) -> float:
+        """
+        使用所有 Patch Tokens 逐位置计算相似度（取平均）
+        
+        注意：此方法对局部差异不够敏感，因为少量差异 patch 会被大量相似 patch 淹没
+        建议使用 compute_similarity_patch_sensitive() 方法
+        
+        Returns:
+            相似度分数 (-1 到 1)
+        """
+        patch_similarities = self._get_patch_similarities(image1, image2)
+        return patch_similarities.mean().item()
+    
+    @torch.no_grad()
+    def compute_similarity_patch_sensitive(self, image1, image2, bottom_k: int = 25, skip_k: int = 17) -> dict:
+        """
+        对局部形变更敏感的相似度计算
+        
+        策略：
+        1. min: 取最不相似的 patch（对差异最敏感）
+        2. bottom_k_mean: 取最不相似的 K 个 patch 的平均值
+        3. bottom_k_robust: 跳过最差的 skip_k 个，取次差的 K 个（抗噪声）
+        4. diff_ratio: 差异 patch 的比例（相似度 < 0.8 的 patch 占比）
+        
+        对于触觉图像：形变区域虽然占比小，但通过关注最不相似的 patch，
+        可以更好地检测到不对称的形变。
+        
+        Args:
+            image1, image2: 图像输入
+            bottom_k: 取最不相似的 K 个 patch (默认 25，约 10%)
+            skip_k: 跳过最差的 K 个 patch (默认 5，避免噪声干扰)
+        
+        Returns:
+            dict: {
+                "min": 最小相似度,
+                "bottom_k_mean": 最不相似的 K 个 patch 的平均值,
+                "bottom_k_robust": 跳过最差 skip_k 个后的 K 个平均值（抗噪声）,
+                "mean": 全部平均（对比用）,
+                "diff_ratio": 差异 patch 比例,
+                "diff_count": 差异 patch 数量
+            }
+        """
+        patch_similarities = self._get_patch_similarities(image1, image2)
+        num_patches = patch_similarities.shape[0]  # 256
+        
+        # 排序，取最不相似的
+        sorted_sims, _ = torch.sort(patch_similarities)
+        
+        # 1. 最小值（最不相似的 patch）
+        min_sim = sorted_sims[0].item()
+        
+        # 2. 底部 K 个的平均值
+        bottom_k = min(bottom_k, num_patches)
+        bottom_k_mean = sorted_sims[:bottom_k].mean().item()
+        
+        # 3. 跳过最差的 skip_k 个，取次差的 K 个（抗噪声）
+        # 例如：跳过最差的5个，取第6-30个（共25个）
+        skip_k = min(skip_k, num_patches - bottom_k)  # 确保有足够的 patch
+        end_idx = min(skip_k + bottom_k, num_patches)
+        bottom_k_robust = sorted_sims[skip_k:end_idx].mean().item()
+        
+        # 4. 全部平均（对比用）
+        mean_sim = patch_similarities.mean().item()
+        
+        # 5. 差异 patch 比例（相似度 < 0.8）
+        diff_threshold = 0.8
+        diff_count = (patch_similarities < diff_threshold).sum().item()
+        diff_ratio = diff_count / num_patches
+        
+        return {
+            "min": min_sim,
+            "bottom_k_mean": bottom_k_mean,
+            "bottom_k_robust": bottom_k_robust,
+            "mean": mean_sim,
+            "diff_ratio": diff_ratio,
+            "diff_count": int(diff_count),
+            "num_patches": num_patches
+        }
+    
     def compute_similarity_matrix(self, images1: list, images2: list = None) -> np.ndarray:
         """
         计算两组图像之间的相似度矩阵
@@ -386,21 +492,55 @@ if __name__ == "__main__":
             with_registers=args.with_registers
         )
         
-        # 计算三种相似度
+
+        # 记录每个函数的运行时间
+        times = {}
+        
+        t0 = time.time()
         sim_original = extractor.compute_similarity(args.image1, args.image2)
+        times['method1_original'] = time.time() - t0
+        
+        t0 = time.time()
         sim_cls = extractor.compute_similarity_cls(args.image1, args.image2)
+        times['method2_cls'] = time.time() - t0
+        
+        t0 = time.time()
         sim_patch = extractor.compute_similarity_patch(args.image1, args.image2)
+        times['method3_patch'] = time.time() - t0
+        
+        t0 = time.time()
+        sim_patch_all = extractor.compute_similarity_patch_all(args.image1, args.image2)
+        times['method4_patch_all'] = time.time() - t0
+        
+        t0 = time.time()
+        sim_sensitive = extractor.compute_similarity_patch_sensitive(args.image1, args.image2, bottom_k=25)
+        times['method5_sensitive'] = time.time() - t0
+        
+        total_time = sum(times.values())
         
         print("\n" + "=" * 60)
         print(f"图像1: {args.image1}")
         print(f"图像2: {args.image2}")
         print("=" * 60)
-        print("\n【三种相似度计算方法对比】")
+        print("\n【基础相似度计算方法】")
         print("-" * 60)
-        print(f"方法1 - 原有方法 (forward+head): {sim_original:.4f}")
-        print(f"方法2 - 仅 CLS Token:            {sim_cls:.4f}")
-        print(f"方法3 - 仅 Patch Tokens (平均):  {sim_patch:.4f}")
+        print(f"方法1 - 原有方法 (forward+head):      {sim_original:.4f}  ({times['method1_original']*1000:.1f}ms)")
+        print(f"方法2 - 仅 CLS Token:                 {sim_cls:.4f}  ({times['method2_cls']*1000:.1f}ms)")
+        print(f"方法3 - Patch Tokens (先平均再比较): {sim_patch:.4f}  ({times['method3_patch']*1000:.1f}ms)")
+        print(f"方法4 - Patch Tokens (逐位置比较):   {sim_patch_all:.4f}  ({times['method4_patch_all']*1000:.1f}ms)")
         print("-" * 60)
+        
+        print("\n【对局部形变敏感的方法】")
+        print("-" * 60)
+        print(f"最小相似度 (最不相似的patch):        {sim_sensitive['min']:.4f}")
+        print(f"底部25个patch平均 (≈10%最差):       {sim_sensitive['bottom_k_mean']:.4f}")
+        print(f"鲁棒平均 (跳过k个噪声,取25个):       {sim_sensitive['bottom_k_robust']:.4f}")
+        print(f"差异patch数量 (相似度<0.8):          {sim_sensitive['diff_count']}/{sim_sensitive['num_patches']}")
+        print(f"差异patch比例:                       {sim_sensitive['diff_ratio']*100:.1f}%")
+        print(f"计算时间:                            {times['method5_sensitive']*1000:.1f}ms")
+        print("-" * 60)
+        
+        print(f"\n【总计时间: {total_time*1000:.1f}ms】")
         
         # 相似度解读（使用原有方法结果）
         print("\n【原有方法相似度解读】")
@@ -414,8 +554,15 @@ if __name__ == "__main__":
             print(f"  {sim_original:.4f} → 不太相似")
         
         print("\n【说明】")
-        print("  - 原有方法: 使用 forward() 输出 (CLS token 经过 head 层)")
-        print("  - CLS Token: 直接使用 forward_features() 的 CLS token")
-        print("  - Patch Tokens: 所有 patch tokens 取平均，保留更多空间信息")
+        print("  基础方法:")
+        print("    - 方法1-4: 全局相似度，对局部差异不够敏感")
+        print("")
+        print("  敏感方法 (推荐用于触觉图像):")
+        print("    - 最小相似度: 只看最不相似的patch，对差异最敏感")
+        print("    - 底部K个平均: 关注最不相似的10%区域")
+        print("    - 差异patch比例: 统计有多少patch发生了显著变化")
+        print("")
+        print("  触觉图像判断不对称:")
+        print("    → 差异patch比例高 或 最小相似度低 → 形变位置不对称")
         print("=" * 60)
 
