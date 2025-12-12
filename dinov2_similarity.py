@@ -77,13 +77,13 @@ def load_dinov2_from_local(model_path: str, with_registers: bool = False):
 
 def get_transform():
     """
-    DINOv2标准图像预处理
+    DINOv2图像预处理（适用于触觉传感器图像）
     
-    参考 dinov2/data/transforms.py 中的 make_classification_eval_transform
+    不使用 CenterCrop，直接 Resize 到目标尺寸，保留完整图像信息
+    这样可以捕捉到图像任意位置的形变
     """
     return transforms.Compose([
-        transforms.Resize(256, interpolation=transforms.InterpolationMode.BICUBIC),
-        transforms.CenterCrop(224),
+        transforms.Resize((224, 224), interpolation=transforms.InterpolationMode.BICUBIC),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
     ])
@@ -141,7 +141,7 @@ class DINOv2FeatureExtractor:
             归一化后的特征向量 [1, embed_dim]
         """
         image = self._load_image(image_input)
-        image_tensor = self.transform(image).unsqueeze(0).to(self.device)
+        image_tensor = self.transform(image).unsqueeze(0).to(self.device) #图像预处理
         
         # 模型前向传播，返回CLS token特征
         # 参考 dinov2/models/vision_transformer.py 第325-330行
@@ -151,7 +151,25 @@ class DINOv2FeatureExtractor:
         # L2归一化 - 对于相似度计算非常重要
         # 参考 dinov2/eval/utils.py 第21-27行 ModelWithNormalize
         features = F.normalize(features, dim=1, p=2)
+
+
+        # with torch.no_grad():
+        #     # 使用 forward_features 而不是 forward
+        #     # 参考: vision_transformer.py 第255行
+        #     output = self.model.forward_features(image_tensor)
+    
+        # # output 字典包含 (参考: vision_transformer.py 第265-270行):
+        # # - "x_norm_clstoken": CLS token [1, embed_dim]
+        # # - "x_norm_patchtokens": patch特征 [1, num_patches, embed_dim]
+        # # - "x_norm_regtokens": register tokens (如果有)
         
+        # patch_features = output["x_norm_patchtokens"]
+        
+        # # reshape 成空间形式 [1, H, W, embed_dim]
+        # B, N, D = patch_features.shape
+        # H = W = int(N ** 0.5)
+        # spatial_features = patch_features.reshape(B, H, W, D)
+            
         return features
     
     @torch.no_grad()
@@ -177,8 +195,8 @@ class DINOv2FeatureExtractor:
         return features
     
     def compute_similarity(self, image1, image2) -> float:
-        """
-        计算两张图像的余弦相似度
+        """        
+        原有方法：使用 forward() 输出计算相似度（经过 head 层的 CLS token）
         
         Args:
             image1, image2: 图像输入
@@ -190,6 +208,75 @@ class DINOv2FeatureExtractor:
         feat2 = self.extract_features(image2)
         
         similarity = F.cosine_similarity(feat1, feat2).item()
+        return similarity
+    
+    @torch.no_grad()
+    def compute_similarity_cls(self, image1, image2) -> float:
+        """
+        仅使用 CLS Token 计算相似度
+        
+        CLS Token 是模型的全局特征表示，捕捉图像的整体语义信息
+        参考: dinov2/models/vision_transformer.py 第255-271行 forward_features()
+        
+        Args:
+            image1, image2: 图像输入
+        
+        Returns:
+            相似度分数 (-1 到 1，越接近1越相似)
+        """
+        img1 = self._load_image(image1)
+        img2 = self._load_image(image2)
+        tensor1 = self.transform(img1).unsqueeze(0).to(self.device)
+        tensor2 = self.transform(img2).unsqueeze(0).to(self.device)
+        
+        # 使用 forward_features 获取原始特征（不经过 head 层）
+        out1 = self.model.forward_features(tensor1)
+        out2 = self.model.forward_features(tensor2)
+        
+        # 获取 CLS token: [1, embed_dim]
+        cls_feat1 = out1["x_norm_clstoken"]
+        cls_feat2 = out2["x_norm_clstoken"]
+        
+        # L2 归一化
+        cls_feat1 = F.normalize(cls_feat1, dim=1, p=2)
+        cls_feat2 = F.normalize(cls_feat2, dim=1, p=2)
+        
+        similarity = F.cosine_similarity(cls_feat1, cls_feat2).item()
+        return similarity
+    
+    @torch.no_grad()
+    def compute_similarity_patch(self, image1, image2) -> float:
+        """
+        仅使用 Patch Tokens 计算相似度（对所有 patch 取平均）
+        
+        Patch Tokens 保留空间信息，每个 token 对应图像的一个局部区域
+        224x224 图像 / patch_size=14 → 16x16=256 个 patch tokens
+        参考: dinov2/models/vision_transformer.py 第255-271行 forward_features()
+        
+        Args:
+            image1, image2: 图像输入
+        
+        Returns:
+            相似度分数 (-1 到 1，越接近1越相似)
+        """
+        img1 = self._load_image(image1)
+        img2 = self._load_image(image2)
+        tensor1 = self.transform(img1).unsqueeze(0).to(self.device)
+        tensor2 = self.transform(img2).unsqueeze(0).to(self.device)
+        
+        # 使用 forward_features 获取完整输出
+        out1 = self.model.forward_features(tensor1)
+        out2 = self.model.forward_features(tensor2)
+        
+        # 获取 patch tokens: [1, num_patches, embed_dim] → 取平均 → [1, embed_dim]
+        patch_feat1 = out1["x_norm_patchtokens"].mean(dim=1)
+        patch_feat2 = out2["x_norm_patchtokens"].mean(dim=1)
+        
+        # L2 归一化
+        patch_feat1 = F.normalize(patch_feat1, dim=1, p=2)
+        patch_feat2 = F.normalize(patch_feat2, dim=1, p=2)
+        
+        similarity = F.cosine_similarity(patch_feat1, patch_feat2).item()
         return similarity
     
     def compute_similarity_matrix(self, images1: list, images2: list = None) -> np.ndarray:
@@ -291,22 +378,36 @@ if __name__ == "__main__":
             with_registers=args.with_registers
         )
         
-        # 计算相似度
-        similarity = extractor.compute_similarity(args.image1, args.image2)
+        # 计算三种相似度
+        sim_original = extractor.compute_similarity(args.image1, args.image2)
+        sim_cls = extractor.compute_similarity_cls(args.image1, args.image2)
+        sim_patch = extractor.compute_similarity_patch(args.image1, args.image2)
         
         print("\n" + "=" * 60)
         print(f"图像1: {args.image1}")
         print(f"图像2: {args.image2}")
-        print(f"相似度: {similarity:.4f}")
         print("=" * 60)
+        print("\n【三种相似度计算方法对比】")
+        print("-" * 60)
+        print(f"方法1 - 原有方法 (forward+head): {sim_original:.4f}")
+        print(f"方法2 - 仅 CLS Token:            {sim_cls:.4f}")
+        print(f"方法3 - 仅 Patch Tokens (平均):  {sim_patch:.4f}")
+        print("-" * 60)
         
-        # 相似度解读
-        if similarity > 0.9:
-            print("解读: 高度相似 / 几乎相同")
-        elif similarity > 0.7:
-            print("解读: 相似 (可能是同类物体/场景)")
-        elif similarity > 0.5:
-            print("解读: 有一定相关性")
+        # 相似度解读（使用原有方法结果）
+        print("\n【原有方法相似度解读】")
+        if sim_original > 0.9:
+            print(f"  {sim_original:.4f} → 高度相似 / 几乎相同")
+        elif sim_original > 0.7:
+            print(f"  {sim_original:.4f} → 相似 (可能是同类物体/场景)")
+        elif sim_original > 0.5:
+            print(f"  {sim_original:.4f} → 有一定相关性")
         else:
-            print("解读: 不太相似")
+            print(f"  {sim_original:.4f} → 不太相似")
+        
+        print("\n【说明】")
+        print("  - 原有方法: 使用 forward() 输出 (CLS token 经过 head 层)")
+        print("  - CLS Token: 直接使用 forward_features() 的 CLS token")
+        print("  - Patch Tokens: 所有 patch tokens 取平均，保留更多空间信息")
+        print("=" * 60)
 
