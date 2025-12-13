@@ -116,6 +116,10 @@ if __name__ == "__main__":
     print("pose_now",pose_now)
     dobot.move_to_pose(pose_now[0]+10, pose_now[1], pose_now[2]+20, pose_now[3], pose_now[4], pose_now[5], speed=10, acceleration=3)
 
+    camera = CameraReader(camera_id=17) #! 注意id有时会变化
+
+    camera = CameraReader(camera_id=16) #! 注意id有时会变化
+
 
 
     
