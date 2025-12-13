@@ -438,8 +438,12 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser(description="DINOv2图像相似度比较")
     # 对称彩色图像
-    parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_133928_yimu_1_flip.jpg")
+    # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_133928_yimu_1_flip.jpg")
+    # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_133928_yimu_2.jpg")
+    # 对称彩色图像（水平镜像）
+    parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_133928_yimu_1.jpg")
     parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_133928_yimu_2.jpg")
+
 
     # parser.add_argument("--image1", type=str, help="第一张图像路径", default="record_yimu_monitor/20251210_134705_yimu_1_flip.jpg")
     # parser.add_argument("--image2", type=str, help="第二张图像路径", default="record_yimu_monitor/20251210_134705_yimu_2.jpg")
