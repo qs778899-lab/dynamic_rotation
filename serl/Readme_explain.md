@@ -45,7 +45,7 @@
     
 
 
-# ResNet (Image Encoder) 流程框架
+# 基于 ResNet 的 Image Encoder 流程框架
 
 ## 数据流概览
 
@@ -136,7 +136,7 @@ Stage 4: 1个Block, 512 ch, stride=(2,2)
 
 ---
 
-## Step 3: Pooling Layer (空间池化)
+## Step 3: Pooling Layer (网络层权重可在RL训练中学习优化)
 
 - **输入**: 来自 Backbone 的特征图 `(B, 4, 4, 512)`
 - **作用**: 将 4×4 的空间特征图转换为固定长度的向量
@@ -190,7 +190,7 @@ x = jnp.max(x, axis=(-3, -2))  # (B, 4, 4, 512) → (B, 512)
 
 ---
 
-### 方法 C: SpatialLearnedEmbeddings ⭐ (SERL 默认使用)
+### 方法 C: SpatialLearnedEmbeddings (学习任务特定的空间注意力)
 
 ```python
 class SpatialLearnedEmbeddings(nn.Module):
