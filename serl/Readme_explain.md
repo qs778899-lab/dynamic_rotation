@@ -255,3 +255,54 @@ class SpatialSoftmax(nn.Module):
 - **含义**: 对每个特征通道，计算"期望空间位置"
 - **输出**: 每个通道激活的"重心坐标" `(x, y)`
 - **优点**: 专门设计用于机器人，捕捉物体位置
+
+
+---
+
+# Image Encoder 对 RL Policy 策略梯度更新引导的原理
+
+## 前向传播
+
+```
+Image (B,128,128,3)
+    ↓
+[ImageNet 标准化]
+    ↓
+[Backbone (冻结，来自 resnet10_params.pkl)]
+    ↓
+Feature Map (B,4,4,512)
+    ↓
+[SpatialLearnedEmbeddings (可学习，随机初始化)]
+    ↓
+Pooled Features (B,4096)
+    ↓
+[Bottleneck: Dense→LayerNorm→tanh (可学习，随机初始化)]
+    ↓
+Image Embedding (B,256)
+    ↓
+[Policy Network (Actor/Critic)]
+    ↓
+Action
+```
+
+## 反向传播
+
+```
+                                    stop_gradient 阻断
+                                          ↓
+Loss ← Policy ← Bottleneck ← SLE ← ─────────── ← Backbone (不更新)
+ ↑       ↓          ↓         ↓
+ │    更新权重    更新权重   更新 kernel
+ │
+基于 Reward/TD Error 计算
+```
+
+## 关键点
+
+| 组件 | 权重来源 | RL 训练时 |
+|------|---------|----------|
+| Backbone | ImageNet 预训练 (`resnet10_params.pkl`) | **冻结**，不更新 |
+| SpatialLearnedEmbeddings | 随机初始化 | **学习**"关注哪些空间位置" |
+| Bottleneck | 随机初始化 | **学习**"如何压缩特征到 256 维" |
+| Policy (Actor/Critic) | 随机初始化 | **学习**"特征→动作的映射" |
+
