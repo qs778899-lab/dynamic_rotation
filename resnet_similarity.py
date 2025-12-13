@@ -3,7 +3,8 @@
 SERL ResNet-10 (多层级特征版) 图像相似度比较工具
 专门针对视触觉(Tactile)图像进行优化：
 1. 支持提取中间层 (Stage 2/3) 特征，保留更多纹理和形状细节
-2. 对比多种 Pooling 策略 (Flatten, GAP, GMP)
+2. 对比多种 Pooling 策略 (Flatten, GAP, GMP, SpatialLearnedEmbeddings, SpatialSoftmax)
+3. 计算每种方法从头到尾的完整耗时
 """
 
 import sys
@@ -21,7 +22,6 @@ import flax.linen as nn
 
 # =============================================================================
 # 1. 重新定义 ResNet 结构以支持提取中间层
-#    (代码源自 serl_launcher，修改了 __call__ 返回值)
 # =============================================================================
 
 ModuleDef = Any
@@ -61,9 +61,7 @@ class ResNetBlock(nn.Module):
         return self.act(residual + y)
 
 class ResNetEncoderWithIntermediates(nn.Module):
-    """
-    支持返回中间层特征的 ResNetEncoder
-    """
+    """支持返回中间层特征的 ResNetEncoder"""
     stage_sizes: Sequence[int]
     block_cls: ModuleDef
     num_filters: int = 64
@@ -74,25 +72,20 @@ class ResNetEncoderWithIntermediates(nn.Module):
 
     @nn.compact
     def __call__(self, observations: jnp.ndarray, train: bool = False):
-        # 1. ImageNet 标准化
         mean = jnp.array([0.485, 0.456, 0.406])
         std = jnp.array([0.229, 0.224, 0.225])
         x = (observations.astype(jnp.float32) / 255.0 - mean) / std
 
-        # 2. 基础配置
         conv = ft.partial(self.conv, use_bias=False, dtype=self.dtype, kernel_init=nn.initializers.kaiming_normal())
         norm = ft.partial(MyGroupNorm, num_groups=4, epsilon=1e-5, dtype=self.dtype)
         act = getattr(nn, self.act)
 
-        # 3. 初始卷积层
         x = conv(self.num_filters, (7, 7), (2, 2), padding=[(3, 3), (3, 3)], name="conv_init")(x)
         x = norm(name="norm_init")(x)
         x = act(x)
         x = nn.max_pool(x, (3, 3), strides=(2, 2), padding="SAME")
 
-        # 4. 逐个 Stage 执行并收集输出
         outputs = {}
-        
         for i, block_size in enumerate(self.stage_sizes):
             for j in range(block_size):
                 stride = (2, 2) if i > 0 and j == 0 else (1, 1)
@@ -103,15 +96,79 @@ class ResNetEncoderWithIntermediates(nn.Module):
                     norm=norm,
                     act=act,
                 )(x)
-            
-            # 记录每个 Stage 结束后的特征图
-            # Stage 编号从 1 开始
             outputs[f'stage_{i+1}'] = x
 
         return outputs
 
 # =============================================================================
-# 2. 特征提取器类
+# 2. Pooling 方法定义
+# =============================================================================
+
+class SpatialLearnedEmbeddings(nn.Module):
+    """可学习的空间嵌入池化"""
+    height: int
+    width: int
+    channel: int
+    num_features: int = 8
+    
+    @nn.compact
+    def __call__(self, features):
+        kernel = self.param(
+            "kernel",
+            nn.initializers.lecun_normal(),
+            (self.height, self.width, self.channel, self.num_features),
+        )
+        
+        batch_size = features.shape[0]
+        # features: (B, H, W, C) -> (B, H, W, C, 1)
+        # kernel: (H, W, C, num_features) -> (1, H, W, C, num_features)
+        features = jnp.sum(
+            jnp.expand_dims(features, -1) * jnp.expand_dims(kernel, 0), 
+            axis=(1, 2)
+        )
+        # 结果: (B, C, num_features) -> (B, C * num_features)
+        features = jnp.reshape(features, [batch_size, -1])
+        return features
+
+
+class SpatialSoftmax(nn.Module):
+    """空间 Softmax 池化，输出每个通道的期望坐标"""
+    height: int
+    width: int
+    channel: int
+    temperature: float = 1.0
+    
+    @nn.compact
+    def __call__(self, features):
+        batch_size = features.shape[0]
+        
+        # 创建坐标网格
+        pos_x, pos_y = jnp.meshgrid(
+            jnp.linspace(-1.0, 1.0, self.width),
+            jnp.linspace(-1.0, 1.0, self.height)
+        )
+        pos_x = pos_x.reshape(-1)  # (H*W,)
+        pos_y = pos_y.reshape(-1)  # (H*W,)
+        
+        # features: (B, H, W, C) -> (B, C, H*W)
+        features = features.transpose(0, 3, 1, 2).reshape(
+            batch_size, self.channel, self.height * self.width
+        )
+        
+        # Softmax attention
+        softmax_attention = nn.softmax(features / self.temperature)  # (B, C, H*W)
+        
+        # 计算期望坐标
+        expected_x = jnp.sum(pos_x * softmax_attention, axis=2)  # (B, C)
+        expected_y = jnp.sum(pos_y * softmax_attention, axis=2)  # (B, C)
+        
+        # 拼接: (B, 2*C)
+        expected_xy = jnp.concatenate([expected_x, expected_y], axis=1)
+        return expected_xy
+
+
+# =============================================================================
+# 3. 特征提取器类
 # =============================================================================
 
 class ResNetFeatureExtractor:
@@ -135,7 +192,7 @@ class ResNetFeatureExtractor:
         with open(model_path, "rb") as f:
             self.params = pkl.load(f)
             
-        # 初始化模型结构 (ResNet-10: stages=[1,1,1,1])
+        # 初始化模型结构
         self.model = ResNetEncoderWithIntermediates(
             stage_sizes=(1, 1, 1, 1), 
             block_cls=ResNetBlock
@@ -148,14 +205,35 @@ class ResNetFeatureExtractor:
         # 预热
         dummy = jnp.zeros((1, 128, 128, 3), dtype=jnp.uint8)
         _ = self.extract_all_stages(dummy)
+        
+        # 预初始化 pooling 层的参数 (用于 SpatialLearnedEmbeddings)
+        self._init_pooling_params()
         print("[ResNet] 模型就绪")
+
+    def _init_pooling_params(self):
+        """预初始化各 Stage 的 SpatialLearnedEmbeddings 参数"""
+        self.sle_params = {}
+        rng = jax.random.PRNGKey(42)
+        
+        # Stage 2: 16x16x128, Stage 3: 8x8x256, Stage 4: 4x4x512
+        stage_configs = {
+            'stage_2': (16, 16, 128),
+            'stage_3': (8, 8, 256),
+            'stage_4': (4, 4, 512),
+        }
+        
+        for stage_name, (h, w, c) in stage_configs.items():
+            sle = SpatialLearnedEmbeddings(height=h, width=w, channel=c, num_features=8)
+            dummy_input = jnp.zeros((1, h, w, c))
+            rng, key = jax.random.split(rng)
+            self.sle_params[stage_name] = sle.init(key, dummy_input)
 
     def _load_image(self, image_input):
         if isinstance(image_input, str):
             img = Image.open(image_input).convert("RGB")
         elif isinstance(image_input, np.ndarray):
             if len(image_input.shape) == 3 and image_input.shape[2] == 3:
-                image_input = image_input[:, :, ::-1] # BGR to RGB
+                image_input = image_input[:, :, ::-1]
             img = Image.fromarray(image_input)
         else:
             img = image_input.convert("RGB")
@@ -168,80 +246,123 @@ class ResNetFeatureExtractor:
         params = {'params': self.params}
         return self.apply_fn(params, img_batch, train=False)
 
-    def compute_similarity_analysis(self, image1_path, image2_path):
-        # 1. 准备数据
-        img1 = self._load_image(image1_path)[None, ...] # (1, 128, 128, 3)
-        img2 = self._load_image(image2_path)[None, ...]
-        
-        # 2. 提取特征
-        feats1 = self.extract_all_stages(img1)
-        feats2 = self.extract_all_stages(img2)
+    def _cosine_sim(self, v1, v2):
+        v1_norm = v1 / (jnp.linalg.norm(v1, axis=-1, keepdims=True) + 1e-6)
+        v2_norm = v2 / (jnp.linalg.norm(v2, axis=-1, keepdims=True) + 1e-6)
+        return float(jnp.dot(v1_norm.flatten(), v2_norm.flatten()))
+
+    def compute_similarity_with_timing(self, image1_path, image2_path):
+        """计算所有方法的相似度，并记录每种方法的完整耗时"""
         
         results = {}
+        stage_configs = {
+            'stage_2': (16, 16, 128),
+            'stage_3': (8, 8, 256),
+            'stage_4': (4, 4, 512),
+        }
         
-        # 3. 逐层级、逐策略计算
-        # Stage 1: 32x32 (过于低级，通常忽略)
-        # Stage 2: 16x16, 128 ch (纹理、局部形状) -> 适合触觉
-        # Stage 3: 8x8, 256 ch   (部件、中级语义) -> 适合触觉
-        # Stage 4: 4x4, 512 ch   (全局语义)       -> 原版默认
+        # 预加载图像（这部分时间会分摊到每个方法）
+        img1_np = self._load_image(image1_path)
+        img2_np = self._load_image(image2_path)
         
-        stages_to_test = ['stage_2', 'stage_3', 'stage_4']
+        print(f"\n{'='*100}")
+        print(f"{'Stage':<10} | {'Method':<25} | {'Similarity':<12} | {'Time (ms)':<12} | {'Description'}")
+        print(f"{'-'*100}")
         
-        print(f"\n{'='*80}")
-        print(f"{'Stage':<10} | {'Resolution':<12} | {'Method':<15} | {'Similarity':<10} | {'Description'}")
-        print(f"{'-'*80}")
-
-        for stage_name in stages_to_test:
-            f1 = feats1[stage_name] # (1, H, W, C)
-            f2 = feats2[stage_name]
+        for stage_name in ['stage_2', 'stage_3', 'stage_4']:
+            h, w, c = stage_configs[stage_name]
+            resolution_str = f"{h}x{w}x{c}"
             
-            H, W, C = f1.shape[1:]
-            resolution_str = f"{H}x{H}x{C}"
-            
-            # --- 策略 A: Flatten (保留空间结构) ---
-            # 展平所有维度，严格比较每个像素点的特征
+            # ==================== 方法 A: Flatten ====================
+            t0 = time.perf_counter()
+            img1 = jnp.array(img1_np)[None, ...]
+            img2 = jnp.array(img2_np)[None, ...]
+            feats1 = self.extract_all_stages(img1)
+            feats2 = self.extract_all_stages(img2)
+            f1, f2 = feats1[stage_name], feats2[stage_name]
             flat1 = f1.reshape(1, -1)
             flat2 = f2.reshape(1, -1)
             sim_flat = self._cosine_sim(flat1, flat2)
+            t_flat = (time.perf_counter() - t0) * 1000
             
-            print(f"{stage_name:<10} | {resolution_str:<12} | {'Flatten(Spatial)':<15} | {sim_flat:.4f}     | 强空间敏感 (推荐触觉)")
-
-            # --- 策略 B: GAP (Global Average Pooling) ---
-            # 平均池化，忽略位置，只看特征是否存在
+            print(f"{stage_name:<10} | {'Flatten (Spatial)':<25} | {sim_flat:.4f}       | {t_flat:.2f}        | 强空间敏感")
+            
+            # ==================== 方法 B: GAP ====================
+            t0 = time.perf_counter()
+            img1 = jnp.array(img1_np)[None, ...]
+            img2 = jnp.array(img2_np)[None, ...]
+            feats1 = self.extract_all_stages(img1)
+            feats2 = self.extract_all_stages(img2)
+            f1, f2 = feats1[stage_name], feats2[stage_name]
             gap1 = jnp.mean(f1, axis=(1, 2))
             gap2 = jnp.mean(f2, axis=(1, 2))
             sim_gap = self._cosine_sim(gap1, gap2)
+            t_gap = (time.perf_counter() - t0) * 1000
             
-            print(f"{stage_name:<10} | {resolution_str:<12} | {'GAP (Avg)':<15} | {sim_gap:.4f}     | 忽略位置，看整体")
-
-            # --- 策略 C: GMP (Global Max Pooling) ---
-            # 最大池化，只看最显著特征
+            print(f"{stage_name:<10} | {'GAP (Avg)':<25} | {sim_gap:.4f}       | {t_gap:.2f}        | 忽略位置")
+            
+            # ==================== 方法 C: GMP ====================
+            t0 = time.perf_counter()
+            img1 = jnp.array(img1_np)[None, ...]
+            img2 = jnp.array(img2_np)[None, ...]
+            feats1 = self.extract_all_stages(img1)
+            feats2 = self.extract_all_stages(img2)
+            f1, f2 = feats1[stage_name], feats2[stage_name]
             gmp1 = jnp.max(f1, axis=(1, 2))
             gmp2 = jnp.max(f2, axis=(1, 2))
             sim_gmp = self._cosine_sim(gmp1, gmp2)
+            t_gmp = (time.perf_counter() - t0) * 1000
             
-            print(f"{stage_name:<10} | {resolution_str:<12} | {'GMP (Max)':<15} | {sim_gmp:.4f}     | 关注最强特征点")
+            print(f"{stage_name:<10} | {'GMP (Max)':<25} | {sim_gmp:.4f}       | {t_gmp:.2f}        | 最强特征")
             
-            print(f"{'-'*80}")
+            # ==================== 方法 D: SpatialLearnedEmbeddings ====================
+            t0 = time.perf_counter()
+            img1 = jnp.array(img1_np)[None, ...]
+            img2 = jnp.array(img2_np)[None, ...]
+            feats1 = self.extract_all_stages(img1)
+            feats2 = self.extract_all_stages(img2)
+            f1, f2 = feats1[stage_name], feats2[stage_name]
+            
+            sle = SpatialLearnedEmbeddings(height=h, width=w, channel=c, num_features=8)
+            sle_out1 = sle.apply(self.sle_params[stage_name], f1)
+            sle_out2 = sle.apply(self.sle_params[stage_name], f2)
+            sim_sle = self._cosine_sim(sle_out1, sle_out2)
+            t_sle = (time.perf_counter() - t0) * 1000
+            
+            print(f"{stage_name:<10} | {'SpatialLearnedEmbed':<25} | {sim_sle:.4f}       | {t_sle:.2f}        | 可学习注意力")
+            
+            # ==================== 方法 E: SpatialSoftmax ====================
+            t0 = time.perf_counter()
+            img1 = jnp.array(img1_np)[None, ...]
+            img2 = jnp.array(img2_np)[None, ...]
+            feats1 = self.extract_all_stages(img1)
+            feats2 = self.extract_all_stages(img2)
+            f1, f2 = feats1[stage_name], feats2[stage_name]
+            
+            ssm = SpatialSoftmax(height=h, width=w, channel=c, temperature=1.0)
+            # SpatialSoftmax 没有可学习参数，用空字典
+            ssm_out1 = ssm.apply({}, f1)
+            ssm_out2 = ssm.apply({}, f2)
+            sim_ssm = self._cosine_sim(ssm_out1, ssm_out2)
+            t_ssm = (time.perf_counter() - t0) * 1000
+            
+            print(f"{stage_name:<10} | {'SpatialSoftmax':<25} | {sim_ssm:.4f}       | {t_ssm:.2f}        | 期望坐标")
+            
+            print(f"{'-'*100}")
             
             results[stage_name] = {
-                'flatten': sim_flat, 
-                'gap': sim_gap, 
-                'gmp': sim_gmp
+                'flatten': {'sim': sim_flat, 'time_ms': t_flat},
+                'gap': {'sim': sim_gap, 'time_ms': t_gap},
+                'gmp': {'sim': sim_gmp, 'time_ms': t_gmp},
+                'sle': {'sim': sim_sle, 'time_ms': t_sle},
+                'ssm': {'sim': sim_ssm, 'time_ms': t_ssm},
             }
             
         return results
 
-    def _cosine_sim(self, v1, v2):
-        # L2 归一化
-        v1_norm = v1 / (jnp.linalg.norm(v1, axis=-1, keepdims=True) + 1e-6)
-        v2_norm = v2 / (jnp.linalg.norm(v2, axis=-1, keepdims=True) + 1e-6)
-        return jnp.dot(v1_norm, v2_norm.T).item()
-
 
 # conda activate serl
 # python resnet_similarity.py
-
 
 
 if __name__ == "__main__":
@@ -277,17 +398,18 @@ if __name__ == "__main__":
         print(f"图像1: {args.image1}")
         print(f"图像2: {args.image2}")
         
-        t0 = time.time()
-        extractor.compute_similarity_analysis(args.image1, args.image2)
-        print(f"\n总耗时: {(time.time()-t0)*1000:.1f}ms")
+        results = extractor.compute_similarity_with_timing(args.image1, args.image2)
         
-        print("\n[触觉图像相似度建议]")
-        print("1. 推荐关注 Stage 2 或 Stage 3 的 'Flatten(Spatial)' 结果。")
-        print("   - 分辨率适中 (16x16 或 8x8)，能保留形变位置信息。")
-        print("   - Flatten 策略强行要求对应位置特征一致，对不对称形变最敏感。")
-        print("2. 避免使用 Stage 4 或 GAP。")
-        print("   - Stage 4 (4x4) 分辨率太低，丢失位置细节。")
-        print("   - GAP 完全忽略位置信息，无法区分'左边压扁'和'右边压扁'。")
+        print("\n[方法说明]")
+        print("  Flatten:              直接展平，严格比较每个空间位置（最敏感）")
+        print("  GAP:                  全局平均池化，忽略位置信息")
+        print("  GMP:                  全局最大池化，只看最强响应")
+        print("  SpatialLearnedEmbed:  8套可学习空间注意力权重（随机初始化）")
+        print("  SpatialSoftmax:       输出每个通道的期望坐标 (x, y)")
+        
+        print("\n[触觉图像建议]")
+        print("  推荐: Stage 2/3 + Flatten，对形变位置最敏感")
+        print("  注意: SpatialLearnedEmbed 此处使用随机权重，仅供参考")
         
     except Exception as e:
         print(f"运行出错: {e}")
